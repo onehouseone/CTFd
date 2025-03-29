@@ -1,19 +1,60 @@
 # Configure the AWS provider
 provider "aws" {
-  region = "us-east-1"  # Change to your preferred region
+  region = "eu-north-1"  # Using Stockholm region
 }
 
-# Generate a unique bucket name
+# ========== VPC NETWORKING ==========
+resource "aws_vpc" "ctfd_vpc" {
+  cidr_block = "10.0.0.0/16"
+  tags = {
+    Name = "CTFd-VPC"
+  }
+}
+
+resource "aws_internet_gateway" "ctfd_igw" {
+  vpc_id = aws_vpc.ctfd_vpc.id
+  tags = {
+    Name = "CTFd-IGW"
+  }
+}
+
+resource "aws_subnet" "ctfd_subnet" {
+  vpc_id                  = aws_vpc.ctfd_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "eu-north-1a"
+  map_public_ip_on_launch = true  # CRITICAL FOR PUBLIC IP
+  tags = {
+    Name = "CTFd-Subnet"
+  }
+}
+
+resource "aws_route_table" "ctfd_rt" {
+  vpc_id = aws_vpc.ctfd_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.ctfd_igw.id
+  }
+
+  tags = {
+    Name = "CTFd-RouteTable"
+  }
+}
+
+resource "aws_route_table_association" "ctfd_rta" {
+  subnet_id      = aws_subnet.ctfd_subnet.id
+  route_table_id = aws_route_table.ctfd_rt.id
+}
+
+# ========== S3 BUCKET ==========
 resource "random_id" "bucket_suffix" {
   byte_length = 4
 }
 
-# Create an S3 bucket for CTF challenges
 resource "aws_s3_bucket" "ctf_challenges_bucket" {
   bucket = "ctf-challenges-bucket-${random_id.bucket_suffix.hex}"
 }
 
-# Add a bucket policy to allow the EC2 instance to access the bucket
 resource "aws_s3_bucket_policy" "ctf_challenges_bucket_policy" {
   bucket = aws_s3_bucket.ctf_challenges_bucket.id
 
@@ -35,7 +76,7 @@ resource "aws_s3_bucket_policy" "ctf_challenges_bucket_policy" {
   })
 }
 
-# Create an IAM role for the EC2 instance
+# ========== IAM ROLE ==========
 resource "aws_iam_role" "ctfd_s3_access_role" {
   name = "ctfd_s3_access_role"
 
@@ -53,7 +94,6 @@ resource "aws_iam_role" "ctfd_s3_access_role" {
   })
 }
 
-# Attach a policy to the IAM role to allow S3 access
 resource "aws_iam_role_policy" "ctfd_s3_access_policy" {
   name = "ctfd_s3_access_policy"
   role = aws_iam_role.ctfd_s3_access_role.id
@@ -73,16 +113,16 @@ resource "aws_iam_role_policy" "ctfd_s3_access_policy" {
   })
 }
 
-# Create an IAM instance profile for the EC2 instance
 resource "aws_iam_instance_profile" "ctfd_s3_access_profile" {
   name = "ctfd_s3_access_profile"
   role = aws_iam_role.ctfd_s3_access_role.name
 }
 
-# Create a security group for the EC2 instance
+# ========== SECURITY GROUP ==========
 resource "aws_security_group" "ctfd_sg" {
   name        = "ctfd_security_group"
   description = "Allow SSH, HTTP, HTTPS, Custom TCP (8000), and ICMP traffic"
+  vpc_id      = aws_vpc.ctfd_vpc.id
 
   ingress {
     from_port   = 22
@@ -127,12 +167,13 @@ resource "aws_security_group" "ctfd_sg" {
   }
 }
 
-# Create an EC2 instance for CTFd
+# ========== EC2 INSTANCE ==========
 resource "aws_instance" "ctfd_instance" {
-  ami           = "ami-04b4f1a9cf54c11d0"  # Ubuntu AMI (Free Tier eligible)
-  instance_type = "t2.micro"               # Free Tier eligible instance type
-  key_name      = "ctfd-key"               # Replace with your EC2 key pair name
-  security_groups = [aws_security_group.ctfd_sg.name]
+  ami           = "ami-0c1ac8a41498c1a9c"  # Ubuntu 22.04 in eu-north-1
+  instance_type = "t3.micro"               # Supported in eu-north-1
+  key_name      = "knightecKey"            # Ensure this key exists in eu-north-1
+  subnet_id     = aws_subnet.ctfd_subnet.id
+  vpc_security_group_ids = [aws_security_group.ctfd_sg.id]
   iam_instance_profile = aws_iam_instance_profile.ctfd_s3_access_profile.name
 
   # User data to install and configure CTFd
@@ -203,12 +244,17 @@ resource "aws_instance" "ctfd_instance" {
   }
 }
 
-# Output the public IP of the EC2 instance
-output "public_ip" {
-  value = aws_instance.ctfd_instance.public_ip
+# ========== ELASTIC IP ==========
+resource "aws_eip" "ctfd_eip" {
+  vpc      = true
+  instance = aws_instance.ctfd_instance.id
 }
 
-# Output the S3 bucket name
+# ========== OUTPUTS ==========
+output "public_ip" {
+  value = aws_eip.ctfd_eip.public_ip  # Guaranteed static public IP
+}
+
 output "s3_bucket_name" {
   value = aws_s3_bucket.ctf_challenges_bucket.bucket
 }
